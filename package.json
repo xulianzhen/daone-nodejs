@@ -1,0 +1,19 @@
+{
+  "name": "daone-vercel-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run vercel-build",
+    "config:local": "node scripts/config-check.mjs local",
+    "config:test": "node scripts/config-check.mjs test",
+    "config:prod": "node scripts/config-check.mjs prod",
+    "dev": "npx vercel dev",
+    "start": "node scripts/local-server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "vercel-build": "node scripts/vercel-build-check.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
