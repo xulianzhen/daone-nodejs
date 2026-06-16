@@ -11,6 +11,7 @@ export function success(data = null) {
 
 export function pageResponse(records, page, pageSize, total) {
   return {
+    items: records,
     records,
     page,
     pageSize,
@@ -40,7 +41,8 @@ export function sendError(res, error, trace) {
   if (error instanceof AppError) {
     sendJson(res, error.status, {
       code: error.code,
-      message: error.message
+      message: error.message,
+      data: error.data
     }, trace);
     return;
   }

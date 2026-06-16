@@ -1,6 +1,6 @@
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
-import { conflict, forbidden, notFound } from "../common/errors.js";
+import { badRequest, conflict, forbidden, notFound } from "../common/errors.js";
 
 const emptyCanvas = () => ({
   schemaVersion: 1,
@@ -60,7 +60,7 @@ export function deleteProject(userId, projectId) {
 
 export function getCanvas(userId, projectId) {
   requireProject(userId, projectId);
-  return store.canvases.get(String(projectId));
+  return toCanvasView(store.canvases.get(String(projectId)));
 }
 
 export function saveCanvas(userId, projectId, body) {
@@ -68,21 +68,29 @@ export function saveCanvas(userId, projectId, body) {
   const current = store.canvases.get(String(projectId));
   const expectedRevision = Number(body.baseRevision ?? body.revision ?? current.revision);
   if (expectedRevision !== current.revision) {
-    throw conflict("CANVAS_REVISION_CONFLICT", "画布版本冲突，请先刷新");
+    throw conflict("CANVAS_REVISION_CONFLICT", "画布版本冲突，请先刷新", {
+      latestRevision: current.revision
+    });
+  }
+  const canvasData = body.canvasData ?? body.canvas;
+  if (!canvasData || typeof canvasData !== "object") {
+    throw badRequest("PARAM_INVALID", "canvasData 不能为空");
   }
   const t = new Date().toISOString();
   current.revision += 1;
-  current.canvas = body.canvas;
+  current.canvas = canvasData;
   current.updatedAt = t;
-  const versionId = nextId();
-  store.versions.set(versionId, {
-    id: versionId,
-    projectId: String(projectId),
-    versionNo: current.revision,
-    canvas: current.canvas,
-    createdAt: t
-  });
-  return current;
+  if ((body.saveType || "MANUAL") === "MANUAL") {
+    const versionId = nextId();
+    store.versions.set(versionId, {
+      id: versionId,
+      projectId: String(projectId),
+      versionNo: current.revision,
+      canvas: current.canvas,
+      createdAt: t
+    });
+  }
+  return { ...toCanvasView(current), savedAt: t };
 }
 
 export function listVersions(userId, projectId) {
@@ -99,14 +107,15 @@ export function getVersion(userId, projectId, versionId) {
   if (!version || version.projectId !== String(projectId)) {
     throw notFound("历史版本不存在");
   }
-  return version;
+  return toVersionView(version);
 }
 
 export function restoreVersion(userId, projectId, versionId) {
   const version = getVersion(userId, projectId, versionId);
   return saveCanvas(userId, projectId, {
     baseRevision: getCanvas(userId, projectId).revision,
-    canvas: version.canvas
+    canvasData: version.canvasData,
+    saveType: "MANUAL"
   });
 }
 
@@ -122,11 +131,37 @@ export function requireProject(userId, projectId) {
 }
 
 function toProjectView(project) {
+  const canvas = store.canvases.get(project.id);
+  const cover = project.coverAssetId ? store.assets.get(String(project.coverAssetId)) : null;
   return {
     id: project.id,
     title: project.title,
     coverAssetId: project.coverAssetId,
+    coverUrl: cover?.previewUrl || null,
+    revision: canvas?.revision ?? 0,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt
+  };
+}
+
+function toCanvasView(canvas) {
+  if (!canvas) return null;
+  return {
+    projectId: canvas.projectId,
+    revision: canvas.revision,
+    canvasData: canvas.canvas,
+    canvas: canvas.canvas,
+    updatedAt: canvas.updatedAt
+  };
+}
+
+function toVersionView(version) {
+  return {
+    id: version.id,
+    projectId: version.projectId,
+    versionNo: version.versionNo,
+    canvasData: version.canvas,
+    canvas: version.canvas,
+    createdAt: version.createdAt
   };
 }

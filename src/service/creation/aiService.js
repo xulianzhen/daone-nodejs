@@ -1,6 +1,8 @@
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
-import { badRequest, forbidden, notFound } from "../common/errors.js";
+import { appConfig } from "../../infrastructure/config/env.js";
+import { badRequest, conflict, forbidden, notFound } from "../common/errors.js";
+import { requireProject } from "./projectService.js";
 
 export function capabilities() {
   return [...store.models.values()]
@@ -10,6 +12,7 @@ export function capabilities() {
       code: item.modelCode,
       name: item.modelName,
       taskType: item.taskType,
+      estimatedPoints: item.basePoints,
       basePoints: item.basePoints,
       parameterSchema: item.parameters
     }));
@@ -21,7 +24,7 @@ export function skills() {
       { code: "ECOMMERCE_IMAGE", name: "电商商品图", description: "生成电商主图与详情图" },
       { code: "IMAGE_REMIX", name: "图片重混", description: "基于参考图做风格变体" },
       { code: "SHORT_SCRIPT", name: "微短剧剧本", description: "生成短视频脚本文案" }
-    ]
+    ].map((item) => ({ ...item, enabled: true, supportedTaskTypes: ["IMAGE", "TEXT", "VIDEO"] }))
   };
 }
 
@@ -30,7 +33,8 @@ export function estimatePoints(capabilityCode, parameters = {}) {
   if (!capability || capability.status !== "ENABLED") {
     throw badRequest("CAPABILITY_NOT_SUPPORTED", "AI 能力不存在或未启用");
   }
-  const count = Math.max(1, Number(parameters.count || 1));
+  const max = Number(capability.parameters?.count?.max || 1);
+  const count = Math.min(max, Math.max(1, Number(parameters.count || 1)));
   return { estimatedPoints: capability.basePoints * count };
 }
 
@@ -55,7 +59,14 @@ export function createTask(userId, idempotencyKey, body) {
   if (!capability) {
     throw badRequest("CAPABILITY_NOT_SUPPORTED", "AI 能力不存在");
   }
+  if (capability.status !== "ENABLED") {
+    throw badRequest("CAPABILITY_DISABLED", "AI 能力已关闭");
+  }
+  if (body.projectId) {
+    requireProject(userId, body.projectId);
+  }
   const points = estimatePoints(body.capabilityCode, body.parameters).estimatedPoints;
+  ensureEnoughPoints(userId, points);
   const id = nextId();
   const t = new Date().toISOString();
   const task = {
@@ -78,6 +89,7 @@ export function createTask(userId, idempotencyKey, body) {
     createdAt: t,
     updatedAt: t
   };
+  task.results = createMockResults(userId, task, capability);
   store.generationTasks.set(id, task);
   chargePoints(userId, points, id);
   return toTaskView(task);
@@ -90,19 +102,23 @@ export function getTask(userId, taskId) {
 export function listTasks(userId, query) {
   return [...store.generationTasks.values()]
     .filter((item) => item.userId === userId)
+    .filter((item) => !query.projectId || item.projectId === String(query.projectId))
     .filter((item) => !query.status || item.status === query.status)
     .filter((item) => !query.taskType || item.taskType === query.taskType)
     .filter((item) => !query.keyword || item.prompt.includes(query.keyword))
+    .filter((item) => !query.dateFrom || item.createdAt >= `${query.dateFrom}T00:00:00.000Z`)
+    .filter((item) => !query.dateTo || item.createdAt <= `${query.dateTo}T23:59:59.999Z`)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .map(toTaskView);
 }
 
 export function cancelTask(userId, taskId) {
   const task = requireTask(userId, taskId);
-  if (task.status === "RUNNING" || task.status === "PENDING") {
-    task.status = "CANCELED";
-    task.updatedAt = new Date().toISOString();
+  if (!["QUEUED", "RUNNING"].includes(task.status)) {
+    throw conflict("TASK_CANNOT_CANCEL", "当前任务不可取消");
   }
+  task.status = "CANCELED";
+  task.updatedAt = new Date().toISOString();
   return toTaskView(task);
 }
 
@@ -116,7 +132,7 @@ function requireTask(userId, taskId) {
 function chargePoints(userId, points, taskId) {
   const account = store.pointAccounts.get(userId);
   if (!account) return;
-  account.availablePoints = Math.max(0, account.availablePoints - points);
+  account.availablePoints -= points;
   account.updatedAt = new Date().toISOString();
   const ledgerId = nextId();
   store.pointLedgers.set(ledgerId, {
@@ -132,7 +148,58 @@ function chargePoints(userId, points, taskId) {
   });
 }
 
+function ensureEnoughPoints(userId, points) {
+  const account = store.pointAccounts.get(userId);
+  if (!account || account.availablePoints < points) {
+    throw badRequest("POINTS_NOT_ENOUGH", "积分不足");
+  }
+}
+
+function createMockResults(userId, task, capability) {
+  const max = Number(capability.parameters?.count?.max || 1);
+  const count = Math.min(max, Math.max(1, Number(task.parameters.count || 1)));
+  if (capability.taskType === "TEXT") {
+    return [{
+      type: "TEXT",
+      content: `根据提示词生成的文案：${task.prompt || "未填写提示词"}`
+    }];
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const assetId = nextId();
+    const extension = capability.taskType === "VIDEO" ? ".mp4" : ".png";
+    const objectKey = `generated/${userId}/${task.id}-${index + 1}${extension}`;
+    const t = new Date().toISOString();
+    const asset = {
+      id: assetId,
+      userId,
+      projectId: task.projectId,
+      type: capability.taskType,
+      source: "GENERATED",
+      fileName: `${capability.modelName}-${index + 1}${extension}`,
+      objectKey,
+      contentType: capability.taskType === "VIDEO" ? "video/mp4" : "image/png",
+      fileSize: 0,
+      width: capability.taskType === "IMAGE" ? 1024 : null,
+      height: capability.taskType === "IMAGE" ? 1024 : null,
+      durationSeconds: capability.taskType === "VIDEO" ? Number(task.parameters.duration || 5) : null,
+      reviewStatus: "AVAILABLE",
+      previewUrl: `${appConfig.storage.publicBaseUrl}/${objectKey}`,
+      createdAt: t,
+      updatedAt: t
+    };
+    store.assets.set(assetId, asset);
+    return {
+      assetId,
+      type: capability.taskType,
+      previewUrl: asset.previewUrl
+    };
+  });
+}
+
 function toTaskView(task) {
+  const resultThumbnails = task.results
+    .map((item) => item.previewUrl)
+    .filter(Boolean);
   return {
     id: task.id,
     projectId: task.projectId,
@@ -140,6 +207,7 @@ function toTaskView(task) {
     taskType: task.taskType,
     capabilityCode: task.capabilityCode,
     prompt: task.prompt,
+    promptSummary: task.prompt.length > 60 ? `${task.prompt.slice(0, 60)}...` : task.prompt,
     parameters: task.parameters,
     referenceAssetIds: task.referenceAssetIds,
     status: task.status,
@@ -148,6 +216,7 @@ function toTaskView(task) {
     actualPoints: task.actualPoints,
     error: task.error,
     results: task.results,
+    resultThumbnails,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt
   };

@@ -3,12 +3,16 @@ import { appConfig } from "../../infrastructure/config/env.js";
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
 import { badRequest, forbidden, notFound } from "../common/errors.js";
+import { requireProject } from "./projectService.js";
 
 export function createUploadTicket(userId, body) {
   if (!body.fileName || !body.contentType || !body.fileSize) {
     throw badRequest("PARAM_INVALID", "fileName、contentType、fileSize 不能为空");
   }
   const type = mediaType(body.contentType);
+  if (body.projectId) {
+    requireProject(userId, body.projectId);
+  }
   const extension = body.fileName.includes(".") ? body.fileName.slice(body.fileName.lastIndexOf(".")) : "";
   const objectKey = `user/${userId}/${crypto.randomUUID()}${extension}`;
   const uploadTicket = `upt_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -41,6 +45,12 @@ export function completeUpload(userId, body) {
   if (Number(body.fileSize) !== ticket.fileSize) {
     throw badRequest("FILE_SIZE_MISMATCH", "上传文件大小与申请凭证时不一致");
   }
+  if (body.projectId) {
+    requireProject(userId, body.projectId);
+  }
+  if (ticket.projectId && body.projectId && ticket.projectId !== String(body.projectId)) {
+    throw badRequest("UPLOAD_TICKET_INVALID", "上传凭证与项目不匹配");
+  }
   const id = nextId();
   const t = new Date().toISOString();
   const asset = {
@@ -68,16 +78,20 @@ export function completeUpload(userId, body) {
 
 export function listAssets(userId, query) {
   let items = [...store.assets.values()].filter((item) => item.reviewStatus === "AVAILABLE");
-  if (query.projectId) items = items.filter((item) => item.projectId === String(query.projectId));
   if (query.type) items = items.filter((item) => item.type === query.type);
   if (query.source) items = items.filter((item) => item.source === query.source);
   if (query.keyword) items = items.filter((item) => item.fileName.includes(query.keyword));
   if (query.scope === "FAVORITE") {
     items = items.filter((item) => store.favorites.has(`${userId}:${item.id}`));
+    if (query.projectId) items = items.filter((item) => !item.projectId || item.projectId === String(query.projectId));
   } else if (query.scope === "CENTER" || query.scope === "RECOMMENDED") {
     items = items.filter((item) => item.source === "TEMPLATE");
+  } else if (query.scope === "FILES") {
+    items = items.filter((item) => item.userId === userId && ["UPLOAD", "GENERATED"].includes(item.source));
+    if (query.projectId) items = items.filter((item) => item.projectId === String(query.projectId));
   } else {
     items = items.filter((item) => item.userId === userId);
+    if (query.projectId) items = items.filter((item) => item.projectId === String(query.projectId));
   }
   return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((item) => toAssetView(item, userId));
 }
@@ -126,6 +140,7 @@ function toAssetView(asset, userId) {
     durationSeconds: asset.durationSeconds,
     status: asset.reviewStatus,
     favorited: store.favorites.has(`${userId}:${asset.id}`),
+    tags: asset.tags || [],
     createdAt: asset.createdAt
   };
 }

@@ -104,4 +104,31 @@ function seed() {
       updatedAt: t
     });
   }
+  for (const item of [
+    ["template-product", "商品主图模板.png", "IMAGE", "电商营销"],
+    ["template-poster", "活动海报模板.png", "IMAGE", "海报广告"],
+    ["template-video", "短视频分镜模板.mp4", "VIDEO", "视频脚本"]
+  ]) {
+    const id = nextId();
+    const objectKey = `templates/${item[0]}`;
+    store.assets.set(id, {
+      id,
+      userId: null,
+      projectId: null,
+      type: item[2],
+      source: "TEMPLATE",
+      fileName: item[1],
+      objectKey,
+      contentType: item[2] === "VIDEO" ? "video/mp4" : "image/png",
+      fileSize: 0,
+      width: item[2] === "IMAGE" ? 1024 : null,
+      height: item[2] === "IMAGE" ? 1024 : null,
+      durationSeconds: item[2] === "VIDEO" ? 8 : null,
+      reviewStatus: "AVAILABLE",
+      previewUrl: `https://picsum.photos/seed/daone-${item[0]}/800/600`,
+      tags: [item[3]],
+      createdAt: t,
+      updatedAt: t
+    });
+  }
 }

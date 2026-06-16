@@ -80,15 +80,19 @@ export function resolveUser(token) {
 
 export function createQrSession() {
   const ticket = `qr_${crypto.randomUUID().replaceAll("-", "")}`;
+  const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+  const authorizeUrl = `${appConfig.frontendBaseUrl}/wechat-login?ticket=${ticket}`;
   return {
     ticket,
-    qrCodeUrl: `${appConfig.frontendBaseUrl}/wechat-login?ticket=${ticket}`,
+    authorizeUrl,
+    qrCodeUrl: authorizeUrl,
+    expiresAt,
     expiresInSeconds: 300
   };
 }
 
 export function getQrStatus(ticket) {
-  return { ticket, status: "PENDING" };
+  return { ticket, status: "WAITING" };
 }
 
 function toLoginUser(user) {

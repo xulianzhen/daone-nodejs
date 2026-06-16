@@ -43,6 +43,7 @@ export function getShare(shareCode) {
       id: project.id,
       title: project.title,
       coverAssetId: project.coverAssetId,
+      canvasData: store.canvases.get(project.id)?.canvas || null,
       canvas: store.canvases.get(project.id)?.canvas || null,
       updatedAt: project.updatedAt
     }

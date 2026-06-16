@@ -1,7 +1,7 @@
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
 import { forbidden, notFound } from "../common/errors.js";
-import { createProject, saveCanvas } from "./projectService.js";
+import { createProject, getProject, saveCanvas } from "./projectService.js";
 
 export function createWorkflow(userId, body) {
   const id = nextId();
@@ -54,9 +54,10 @@ export function createProjectFromWorkflow(userId, workflowId, title) {
   const project = createProject(userId, title);
   saveCanvas(userId, project.id, {
     baseRevision: 0,
-    canvas: workflow.workflowData
+    canvasData: workflow.workflowData,
+    saveType: "MANUAL"
   });
-  return project;
+  return getProject(userId, project.id);
 }
 
 function requireWorkflow(userId, workflowId) {
