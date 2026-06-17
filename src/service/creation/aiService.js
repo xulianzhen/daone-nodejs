@@ -1,8 +1,10 @@
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
 import { appConfig } from "../../infrastructure/config/env.js";
-import { badRequest, conflict, forbidden, notFound } from "../common/errors.js";
+import { badGateway, badRequest, conflict, forbidden, notFound } from "../common/errors.js";
 import { requireProject } from "./projectService.js";
+import { assertAssetsAccessible } from "./assetService.js";
+import { createProviderGenerationTask } from "../../infrastructure/middleware/modelClient.js";
 
 export function capabilities() {
   return [...store.models.values()]
@@ -46,7 +48,7 @@ export function translatePrompt(text, targetLanguage = "EN") {
   };
 }
 
-export function createTask(userId, idempotencyKey, body) {
+export async function createTask(userId, idempotencyKey, body) {
   if (!idempotencyKey) {
     throw badRequest("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key 不能为空");
   }
@@ -65,6 +67,7 @@ export function createTask(userId, idempotencyKey, body) {
   if (body.projectId) {
     requireProject(userId, body.projectId);
   }
+  assertAssetsAccessible(userId, body.referenceAssetIds || []);
   const points = estimatePoints(body.capabilityCode, body.parameters).estimatedPoints;
   ensureEnoughPoints(userId, points);
   const id = nextId();
@@ -80,18 +83,33 @@ export function createTask(userId, idempotencyKey, body) {
     parameters: body.parameters || {},
     referenceAssetIds: body.referenceAssetIds || [],
     idempotencyKey,
-    status: "SUCCEEDED",
-    progress: 100,
+    status: appConfig.model.mockEnabled ? "SUCCEEDED" : "QUEUED",
+    progress: appConfig.model.mockEnabled ? 100 : 0,
     estimatedPoints: points,
-    actualPoints: points,
+    actualPoints: appConfig.model.mockEnabled ? points : null,
     error: null,
     results: [],
     createdAt: t,
     updatedAt: t
   };
-  task.results = createMockResults(userId, task, capability);
+  if (appConfig.model.mockEnabled) {
+    task.results = createMockResults(userId, task, capability);
+  } else {
+    const providerTask = await safeCreateProviderTask(task, capability);
+    task.providerTaskId = providerTask.providerTaskId;
+    task.status = providerTask.status;
+    task.progress = providerTask.progress;
+    task.results = materializeProviderResults(userId, task, providerTask.results);
+    if (task.results.length > 0 || task.status === "SUCCEEDED") {
+      task.status = "SUCCEEDED";
+      task.progress = 100;
+      task.actualPoints = points;
+    }
+  }
   store.generationTasks.set(id, task);
-  chargePoints(userId, points, id);
+  if (task.status === "SUCCEEDED") {
+    chargePoints(userId, points, id);
+  }
   return toTaskView(task);
 }
 
@@ -194,6 +212,51 @@ function createMockResults(userId, task, capability) {
       previewUrl: asset.previewUrl
     };
   });
+}
+
+function materializeProviderResults(userId, task, results) {
+  return results.map((result, index) => {
+    if (result.assetId || result.type === "TEXT") {
+      return result;
+    }
+    const type = result.type || task.taskType;
+    const assetId = nextId();
+    const extension = type === "VIDEO" ? ".mp4" : ".png";
+    const objectKey = result.objectKey || `generated/${userId}/${task.id}-${index + 1}${extension}`;
+    const t = new Date().toISOString();
+    const asset = {
+      id: assetId,
+      userId,
+      projectId: task.projectId,
+      type,
+      source: "GENERATED",
+      fileName: result.fileName || `${task.capabilityCode}-${index + 1}${extension}`,
+      objectKey,
+      contentType: result.contentType || (type === "VIDEO" ? "video/mp4" : "image/png"),
+      fileSize: Number(result.fileSize || 0),
+      width: result.width ?? null,
+      height: result.height ?? null,
+      durationSeconds: result.durationSeconds ?? null,
+      reviewStatus: "AVAILABLE",
+      previewUrl: result.previewUrl || `${appConfig.storage.publicBaseUrl.replace(/\/$/, "")}/${objectKey}`,
+      createdAt: t,
+      updatedAt: t
+    };
+    store.assets.set(assetId, asset);
+    return {
+      assetId,
+      type,
+      previewUrl: asset.previewUrl
+    };
+  });
+}
+
+async function safeCreateProviderTask(task, capability) {
+  try {
+    return await createProviderGenerationTask(task, capability);
+  } catch (error) {
+    throw badGateway("MODEL_SERVICE_ERROR", "外部模型服务异常", { reason: error.message });
+  }
 }
 
 function toTaskView(task) {

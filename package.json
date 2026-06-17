@@ -15,5 +15,9 @@
   },
   "engines": {
     "node": "22.x"
+  },
+  "dependencies": {
+    "ioredis": "^5.11.1",
+    "mysql2": "^3.22.5"
   }
 }

@@ -1,3 +1,9 @@
+CREATE TABLE daone_runtime_store (
+    store_key VARCHAR(64) PRIMARY KEY,
+    store_value CLOB NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
 CREATE TABLE user_account (
     id BIGINT PRIMARY KEY,
     phone VARCHAR(20),

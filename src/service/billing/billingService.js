@@ -1,6 +1,9 @@
+import crypto from "node:crypto";
+import { appConfig } from "../../infrastructure/config/env.js";
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId, orderNo as newOrderNo } from "../../infrastructure/common/id.js";
-import { badRequest, conflict, forbidden, notFound } from "../common/errors.js";
+import { badGateway, badRequest, conflict, forbidden, notFound } from "../common/errors.js";
+import { createChannelPayment } from "../../infrastructure/middleware/paymentClient.js";
 
 export function plans() {
   return [...store.prices.values()]
@@ -11,7 +14,9 @@ export function plans() {
       return {
         code: price.priceCode,
         name: plan.planName,
-        cycle: price.cycleUnit === "YEAR" && price.cycleCount === 2 ? "TWO_YEARS" : price.cycleUnit,
+        cycle: displayCycle(price),
+        cycleUnit: price.cycleUnit,
+        cycleCount: price.cycleCount,
         priceFen: price.priceFen,
         originalPriceFen: price.originalPriceFen,
         grantPoints: price.grantPoints,
@@ -62,7 +67,7 @@ export function createOrder(userId, idempotencyKey, body) {
   return toOrderCreateView(order);
 }
 
-export function createPayment(userId, orderNo, body) {
+export async function createPayment(userId, orderNo, body) {
   const order = requireOrder(userId, orderNo);
   if (order.status === "PAID") {
     throw conflict("ORDER_STATUS_INVALID", "订单已支付");
@@ -72,6 +77,7 @@ export function createPayment(userId, orderNo, body) {
   }
   order.status = "PAYING";
   order.updatedAt = new Date().toISOString();
+  const channelPayment = await safeCreateChannelPayment(order, body.payType);
   const transaction = {
     id: nextId(),
     transactionNo: newOrderNo("PT"),
@@ -79,8 +85,8 @@ export function createPayment(userId, orderNo, body) {
     payType: body.payType,
     channelTransactionNo: null,
     status: "CREATED",
-    qrCodeContent: body.payType === "WECHAT" ? `weixin://wxpay/mock/${orderNo}` : null,
-    redirectUrl: body.payType === "ALIPAY" ? `https://openapi.alipay.com/mock/${orderNo}` : null,
+    qrCodeContent: channelPayment?.qrCodeContent ?? (body.payType === "WECHAT" ? `weixin://wxpay/mock/${orderNo}` : null),
+    redirectUrl: channelPayment?.redirectUrl ?? (body.payType === "ALIPAY" ? `https://openapi.alipay.com/mock/${orderNo}` : null),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -106,11 +112,15 @@ export function listOrders(userId, status) {
 }
 
 export function completeLocalPayment(userId, orderNo) {
+  if (appConfig.profile !== "local" || !appConfig.payment.mockEnabled) {
+    throw forbidden();
+  }
   const order = requireOrder(userId, orderNo);
   completeOrder(order, `LOCAL-${Date.now()}`);
 }
 
-export function notifyPayment(payType, body) {
+export function notifyPayment(payType, body, headers = {}) {
+  verifyPaymentNotify(body, headers);
   const order = store.orders.get(body.orderNo);
   if (!order) throw notFound("订单不存在");
   if (order.amountFen !== Number(body.amountFen) || order.currency !== body.currency) {
@@ -202,7 +212,55 @@ function toOrderView(order) {
 
 function addCycle(date, price) {
   const result = new Date(date);
+  if (price.cycleUnit === "DAY") result.setDate(result.getDate() + price.cycleCount);
   if (price.cycleUnit === "MONTH") result.setMonth(result.getMonth() + price.cycleCount);
   if (price.cycleUnit === "YEAR") result.setFullYear(result.getFullYear() + price.cycleCount);
   return result;
+}
+
+function displayCycle(price) {
+  if (price.cycleUnit === "YEAR" && price.cycleCount === 2) return "TWO_YEARS";
+  if (price.cycleUnit === "DAY") return `${price.cycleCount}_DAYS`;
+  return price.cycleUnit;
+}
+
+async function safeCreateChannelPayment(order, payType) {
+  try {
+    return await createChannelPayment(order, payType);
+  } catch (error) {
+    throw badGateway("PAYMENT_FAILED", "支付创建失败", { reason: error.message });
+  }
+}
+
+function verifyPaymentNotify(body, headers) {
+  if (appConfig.payment.mockEnabled) {
+    return;
+  }
+  const signature = headers["x-daone-payment-signature"];
+  if (!signature || !appConfig.payment.notifySecret) {
+    throw forbidden();
+  }
+  const expected = paymentNotifySignature(body);
+  if (!safeEqual(signature, expected)) {
+    throw forbidden();
+  }
+}
+
+function paymentNotifySignature(body) {
+  const payload = [
+    body.orderNo || "",
+    body.amountFen ?? "",
+    body.currency || "",
+    body.channelTransactionNo || ""
+  ].join(":");
+  return crypto
+    .createHmac("sha256", appConfig.payment.notifySecret)
+    .update(payload)
+    .digest("hex");
+}
+
+function safeEqual(actual, expected) {
+  const actualBuffer = Buffer.from(String(actual));
+  const expectedBuffer = Buffer.from(String(expected));
+  return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }

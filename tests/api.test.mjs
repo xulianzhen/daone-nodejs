@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 process.env.DAONE_ADMIN_PHONES = "13800138000";
 const { handleRequest } = await import("../src/starter/app.js");
+const { appConfig } = await import("../src/infrastructure/config/env.js");
 
 describe("Daone Vercel Node API", () => {
   it("supports core frontend flow", async () => {
@@ -129,7 +130,27 @@ describe("Daone Vercel Node API", () => {
 
     response = await request("GET", "/api/v1/plans", null, token);
     assert.equal(response.status, 200);
-    assert.equal(response.body.data.items.length, 2);
+    assert.ok(response.body.data.items.length >= 9);
+    assert.ok(response.body.data.items.some((item) => item.code === "ENTERPRISE_TWO_YEARS"));
+    assert.ok(response.body.data.items.some((item) => item.code === "TRIAL_5D"));
+
+    response = await request("GET", "/api/v1/plans");
+    assert.equal(response.status, 200);
+    assert.ok(response.body.data.items.some((item) => item.code === "TEAM_YEAR"));
+
+    response = await request("POST", "/api/v1/trial-applications/sms-codes", {
+      phone: "13900139000"
+    });
+    assert.equal(response.status, 200);
+
+    response = await request("POST", "/api/v1/trial-applications", {
+      phone: "13900139000",
+      code: "123456",
+      contactName: "试用客户",
+      position: "运营负责人"
+    }, null, { "Idempotency-Key": "trial-1" });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.data.amountFen, 9900);
 
     response = await request("POST", "/api/v1/orders", {
       orderType: "PLAN",
@@ -150,6 +171,23 @@ describe("Daone Vercel Node API", () => {
     response = await request("GET", `/api/v1/orders/${orderNo}`, null, token);
     assert.equal(response.status, 200);
     assert.equal(response.body.data.status, "PAID");
+
+    const originalProfile = appConfig.profile;
+    const originalPaymentMock = appConfig.payment.mockEnabled;
+    appConfig.profile = "prod";
+    appConfig.payment.mockEnabled = false;
+    response = await request("POST", `/api/v1/orders/${orderNo}/mock-paid`, {}, token);
+    assert.equal(response.status, 403);
+    appConfig.profile = originalProfile;
+    appConfig.payment.mockEnabled = originalPaymentMock;
+
+    const originalStorageMock = appConfig.storage.mockEnabled;
+    appConfig.storage.mockEnabled = false;
+    response = await request("GET", "/api/mock-files/user/test.png");
+    assert.equal(response.status, 404);
+    response = await request("POST", "/api/mock-files/upload", {});
+    assert.equal(response.status, 404);
+    appConfig.storage.mockEnabled = originalStorageMock;
 
     response = await request("GET", "/api/admin/v1/users", null, token);
     assert.equal(response.status, 200);

@@ -1,14 +1,19 @@
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
-import { forbidden, notFound } from "../common/errors.js";
+import { badRequest, forbidden, notFound } from "../common/errors.js";
+import { requireProject } from "./projectService.js";
+import { assertAssetsAccessible } from "./assetService.js";
 
 export function createSession(userId, body) {
+  if (body.projectId) {
+    requireProject(userId, body.projectId);
+  }
   const id = nextId();
   const t = new Date().toISOString();
   const session = {
     id,
     userId,
-    projectId: String(body.projectId || "0"),
+    projectId: body.projectId ? String(body.projectId) : null,
     title: body.title || "New Chat",
     deleted: false,
     createdAt: t,
@@ -36,6 +41,10 @@ export function messages(userId, sessionId) {
 
 export function sendMessage(userId, sessionId, body) {
   const session = requireSession(userId, sessionId);
+  if (!body.content || !String(body.content).trim()) {
+    throw badRequest("PARAM_INVALID", "消息内容不能为空");
+  }
+  assertAssetsAccessible(userId, body.attachmentAssetIds || []);
   const t = new Date().toISOString();
   const userMessage = {
     id: nextId(),

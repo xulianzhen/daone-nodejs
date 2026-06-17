@@ -1,9 +1,10 @@
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
-import { forbidden, notFound } from "../common/errors.js";
+import { badRequest, forbidden, notFound } from "../common/errors.js";
 import { createProject, getProject, saveCanvas } from "./projectService.js";
 
 export function createWorkflow(userId, body) {
+  assertWorkflowBody(body);
   const id = nextId();
   const t = new Date().toISOString();
   const workflow = {
@@ -11,7 +12,7 @@ export function createWorkflow(userId, body) {
     userId,
     name: body.name,
     description: body.description || null,
-    coverAssetId: body.coverAssetId || null,
+    coverAssetId: body.coverAssetId ? assertAccessibleAsset(userId, body.coverAssetId).id : null,
     workflowData: body.workflowData,
     deleted: false,
     createdAt: t,
@@ -34,11 +35,12 @@ export function getWorkflow(userId, workflowId) {
 }
 
 export function updateWorkflow(userId, workflowId, body) {
+  assertWorkflowBody(body);
   const workflow = requireWorkflow(userId, workflowId);
   Object.assign(workflow, {
     name: body.name,
     description: body.description || null,
-    coverAssetId: body.coverAssetId || null,
+    coverAssetId: body.coverAssetId ? assertAccessibleAsset(userId, body.coverAssetId).id : null,
     workflowData: body.workflowData,
     updatedAt: new Date().toISOString()
   });
@@ -77,4 +79,24 @@ function toView(workflow) {
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt
   };
+}
+
+function assertAccessibleAsset(userId, assetId) {
+  const asset = store.assets.get(String(assetId));
+  if (!asset || asset.reviewStatus === "DELETED") {
+    throw notFound("素材不存在");
+  }
+  if (asset.userId !== userId && asset.source !== "TEMPLATE") {
+    throw forbidden();
+  }
+  return asset;
+}
+
+function assertWorkflowBody(body) {
+  if (!body.name || !String(body.name).trim()) {
+    throw badRequest("PARAM_INVALID", "工作流名称不能为空");
+  }
+  if (!body.workflowData || typeof body.workflowData !== "object") {
+    throw badRequest("PARAM_INVALID", "workflowData 不能为空");
+  }
 }

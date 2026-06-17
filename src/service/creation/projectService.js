@@ -47,7 +47,9 @@ export function getProject(userId, projectId) {
 export function updateProject(userId, projectId, body) {
   const project = requireProject(userId, projectId);
   if (body.title !== undefined) project.title = body.title;
-  if (body.coverAssetId !== undefined) project.coverAssetId = body.coverAssetId;
+  if (body.coverAssetId !== undefined) {
+    project.coverAssetId = body.coverAssetId === null ? null : assertAccessibleAsset(userId, body.coverAssetId).id;
+  }
   project.updatedAt = new Date().toISOString();
   return toProjectView(project);
 }
@@ -164,4 +166,15 @@ function toVersionView(version) {
     canvas: version.canvas,
     createdAt: version.createdAt
   };
+}
+
+function assertAccessibleAsset(userId, assetId) {
+  const asset = store.assets.get(String(assetId));
+  if (!asset || asset.reviewStatus === "DELETED") {
+    throw notFound("素材不存在");
+  }
+  if (asset.userId !== userId && asset.source !== "TEMPLATE") {
+    throw forbidden();
+  }
+  return asset;
 }

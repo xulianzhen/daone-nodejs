@@ -2,8 +2,9 @@ import crypto from "node:crypto";
 import { appConfig } from "../../infrastructure/config/env.js";
 import { store } from "../../infrastructure/db/memoryStore.js";
 import { nextId } from "../../infrastructure/common/id.js";
-import { badRequest, forbidden, notFound } from "../common/errors.js";
+import { badGateway, badRequest, forbidden, notFound } from "../common/errors.js";
 import { requireProject } from "./projectService.js";
+import { reviewAsset } from "../../infrastructure/middleware/contentSafetyClient.js";
 
 export function createUploadTicket(userId, body) {
   if (!body.fileName || !body.contentType || !body.fileSize) {
@@ -27,17 +28,18 @@ export function createUploadTicket(userId, body) {
     objectKey,
     expiresAt
   });
+  const uploadTarget = createUploadTarget(objectKey, body.contentType, expiresAt);
   return {
     uploadTicket,
-    uploadMethod: "POST",
-    uploadUrl: "/api/mock-files/upload",
+    uploadMethod: uploadTarget.uploadMethod,
+    uploadUrl: uploadTarget.uploadUrl,
     objectKey,
-    formFields: { key: objectKey },
+    formFields: uploadTarget.formFields,
     expiresAt
   };
 }
 
-export function completeUpload(userId, body) {
+export async function completeUpload(userId, body) {
   const ticket = store.uploadTickets.get(body.uploadTicket);
   if (!ticket || ticket.userId !== userId) {
     throw badRequest("UPLOAD_TICKET_INVALID", "上传凭证无效");
@@ -66,11 +68,13 @@ export function completeUpload(userId, body) {
     width: null,
     height: null,
     durationSeconds: null,
-    reviewStatus: "AVAILABLE",
-    previewUrl: `${appConfig.storage.publicBaseUrl}/${ticket.objectKey}`,
+    reviewStatus: "REVIEWING",
+    previewUrl: publicObjectUrl(ticket.objectKey),
     createdAt: t,
     updatedAt: t
   };
+  const review = await safeReviewAsset(asset);
+  asset.reviewStatus = review.status;
   store.assets.set(id, asset);
   store.uploadTickets.delete(body.uploadTicket);
   return toAssetView(asset, userId);
@@ -116,6 +120,12 @@ export function deleteAsset(userId, assetId) {
   asset.reviewStatus = "DELETED";
 }
 
+export function assertAssetsAccessible(userId, assetIds = []) {
+  for (const assetId of assetIds || []) {
+    requireAsset(userId, assetId);
+  }
+}
+
 function requireAsset(userId, assetId) {
   const asset = store.assets.get(String(assetId));
   if (!asset || asset.reviewStatus === "DELETED") {
@@ -149,4 +159,67 @@ function mediaType(contentType) {
   if (contentType.startsWith("image/")) return "IMAGE";
   if (contentType.startsWith("video/")) return "VIDEO";
   throw badRequest("FILE_TYPE_NOT_SUPPORTED", "仅支持图片和视频");
+}
+
+async function safeReviewAsset(asset) {
+  try {
+    return await reviewAsset(asset);
+  } catch (error) {
+    throw badGateway("CONTENT_SAFETY_ERROR", "内容安全服务异常", { reason: error.message });
+  }
+}
+
+function createUploadTarget(objectKey, contentType, expiresAt) {
+  if (appConfig.storage.mockEnabled) {
+    return {
+      uploadMethod: "POST",
+      uploadUrl: "/api/mock-files/upload",
+      formFields: { key: objectKey }
+    };
+  }
+  return {
+    uploadMethod: "PUT",
+    uploadUrl: signedOssPutUrl(objectKey, contentType, expiresAt),
+    formFields: { "Content-Type": contentType }
+  };
+}
+
+function publicObjectUrl(objectKey) {
+  if (appConfig.storage.publicBaseUrl) {
+    return joinUrl(appConfig.storage.publicBaseUrl, objectKey);
+  }
+  return ossObjectUrl(objectKey);
+}
+
+function ossObjectUrl(objectKey) {
+  const endpoint = appConfig.storage.oss.endpoint.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const bucket = appConfig.storage.oss.bucket;
+  if (!endpoint || !bucket) {
+    return joinUrl(appConfig.storage.publicBaseUrl || "/api/mock-files", objectKey);
+  }
+  return `https://${bucket}.${endpoint}/${encodeObjectKey(objectKey)}`;
+}
+
+function signedOssPutUrl(objectKey, contentType, expiresAt) {
+  const expires = Math.floor(new Date(expiresAt).getTime() / 1000);
+  const resource = `/${appConfig.storage.oss.bucket}/${objectKey}`;
+  const stringToSign = ["PUT", "", contentType, expires, resource].join("\n");
+  const signature = crypto
+    .createHmac("sha1", appConfig.aliyun.accessKeySecret)
+    .update(stringToSign)
+    .digest("base64");
+  const params = new URLSearchParams({
+    OSSAccessKeyId: appConfig.aliyun.accessKeyId,
+    Expires: String(expires),
+    Signature: signature
+  });
+  return `${ossObjectUrl(objectKey)}?${params.toString()}`;
+}
+
+function joinUrl(baseUrl, objectKey) {
+  return `${baseUrl.replace(/\/$/, "")}/${encodeObjectKey(objectKey)}`;
+}
+
+function encodeObjectKey(objectKey) {
+  return String(objectKey).split("/").map(encodeURIComponent).join("/");
 }

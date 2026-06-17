@@ -7,7 +7,7 @@
 - `api/[...path].js`: Vercel Serverless 函数入口。
 - `src/starter`: 应用启动、路由注册、OpenAPI。
 - `src/service`: 业务服务，按 `auth`、`user`、`creation`、`billing`、`operation` 划分。
-- `src/infrastructure`: 内存仓储、ID 等基础设施。
+- `src/infrastructure`: 配置、内存仓储、ID、MySQL/Redis/OSS/短信/模型/支付等基础设施适配。
 - `tests`: 接口级自动化测试。
 
 ## Local Run
@@ -34,7 +34,7 @@ npm start
 - Framework Preset: `Other`
 - Build Command: `npm run vercel-build`
 - Output Directory: 留空
-- Node.js Version: `20.x`
+- Node.js Version: `22.x`
 - 环境变量参考：`.env.vercel.example`
 
 部署后接口前缀：
@@ -65,7 +65,8 @@ Node.js 版本使用轻量 `.env` 文件区分环境，作用类似 Java 的 `ap
 curl http://localhost:8080/api/health
 ```
 
-测试/生产如果缺少关键真实中间件配置，`missingRequired` 会列出缺失变量名，方便部署后排查。
+测试/生产如果缺少关键真实中间件配置，`ready=false`，`missingRequired` 会列出缺失变量名，
+`middleware` 会列出当前启用的真实中间件能力，方便部署后排查。
 
 也可以在本地直接检查配置：
 
@@ -86,25 +87,34 @@ DAONE_CONFIG_STRICT=true npm run config:prod
 当前 Node 版本已覆盖这些接口能力：
 
 - 短信登录、微信扫码占位、退出登录。
+- 试用申请短信验证码和试用订单。
 - 用户资料、积分账户、积分流水。
 - 首页最近项目、灵感分类和灵感内容。
 - 项目、画布、历史版本、项目分享。
 - 素材上传凭证、Mock 上传、素材列表、收藏。
 - AI 能力、积分预估、提示词翻译、生成任务。
 - AI 对话、工作流。
-- 套餐、订单、微信/支付宝 Mock 支付、本地支付成功模拟。
+- 套餐、订单、微信/支付宝支付、本地支付成功模拟。
 - 管理端用户、订单、套餐、模型、提示词、灵感内容维护。
 
 ## Important Notes
 
-Vercel Serverless 函数不是长驻应用。当前版本为了确保可部署，默认使用内存仓储和 Mock 外部能力，适合前后端联调和部署验证。
+Vercel Serverless 函数不是长驻应用。local Profile 固定使用内存仓储和 Mock 外部能力，适合前后端联调和部署验证。
 
-正式生产建议后续替换：
+`test`/`prod` Profile 会启用真实中间件适配：
 
-- 内存仓储 -> Vercel Postgres / Neon / PlanetScale / 阿里云 RDS HTTP 访问层。
-- 内存 Token -> Upstash Redis / Vercel KV。
-- Mock 上传 -> Vercel Blob / 阿里云 OSS 预签名上传。
-- Mock 支付 -> 微信支付/支付宝正式回调验签。
+- Redis 存储短信验证码和登录 token。
+- MySQL `daone_runtime_store` 保存 Node 运行态快照。
+- OSS PUT 预签名上传。
+- 阿里云短信发送验证码。
+- 内容安全、模型服务通过 HTTP Provider 调用。
+- 微信 Native 支付和支付宝 Page Pay 创建支付。
+
+高并发生产前建议继续替换：
+
+- MySQL runtime snapshot -> 表级 Repository 和事务边界。
+- 通用内容安全 Provider -> 正式内容安全 SDK 或公司内部风控服务。
+- 模型 HTTP Provider -> 统一模型网关、任务回调和重试补偿。
 
 这些替换应优先收敛在 `src/infrastructure`，尽量不改变 `/api/v1` 接口契约。
 # daone-nodejs

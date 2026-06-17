@@ -12,3 +12,4 @@ export const unauthorized = () => new AppError(401, "UNAUTHORIZED", "请先登�
 export const forbidden = () => new AppError(403, "FORBIDDEN", "无权访问");
 export const notFound = (message = "资源不存在") => new AppError(404, "NOT_FOUND", message);
 export const conflict = (code, message, data = null) => new AppError(409, code, message, data);
+export const badGateway = (code, message, data = null) => new AppError(502, code, message, data);

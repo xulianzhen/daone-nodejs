@@ -2,7 +2,7 @@ import { Router } from "../service/common/router.js";
 import { appConfig, configHealth } from "../infrastructure/config/env.js";
 import { readJson, parsePage, paginate } from "../service/common/http.js";
 import { pageResponse, sendError, sendJson, sendNoContent, success, traceId } from "../service/common/response.js";
-import { forbidden, unauthorized } from "../service/common/errors.js";
+import { forbidden, notFound, unauthorized } from "../service/common/errors.js";
 import * as auth from "../service/auth/authService.js";
 import * as userService from "../service/user/userService.js";
 import * as projectService from "../service/creation/projectService.js";
@@ -12,18 +12,20 @@ import * as aiService from "../service/creation/aiService.js";
 import * as chatService from "../service/creation/chatService.js";
 import * as workflowService from "../service/creation/workflowService.js";
 import * as billingService from "../service/billing/billingService.js";
+import * as trialService from "../service/billing/trialService.js";
 import * as homeService from "../service/home/homeService.js";
 import * as adminService from "../service/operation/adminService.js";
 import { docsHtml, openApiSpec } from "./openapi.js";
+import { hydrateRuntimeStore, persistRuntimeStore } from "../infrastructure/middleware/mysqlRuntimeStore.js";
 
 const router = new Router();
 
-router.post("/api/v1/auth/sms-codes", async ({ body }) => auth.sendSmsCode(body.phone), { public: true });
+router.post("/api/v1/auth/sms-codes", async ({ body }) => auth.sendSmsCode(body.phone, body.scene || "LOGIN"), { public: true });
 router.post("/api/v1/auth/sms-login", async ({ body }) => auth.loginBySms(body.phone, body.code), { public: true });
 router.post("/api/v1/auth/wechat/qr-sessions", async () => auth.createQrSession(), { public: true });
 router.get("/api/v1/auth/wechat/qr-sessions/:ticket", async ({ params }) => auth.getQrStatus(params.ticket), { public: true });
 router.post("/api/v1/auth/logout", async ({ token }) => {
-  if (token) auth.logout(token);
+  if (token) await auth.logout(token);
   return null;
 });
 
@@ -56,7 +58,12 @@ router.delete("/api/v1/projects/:projectId/shares/:shareCode", async ({ user, pa
 });
 
 router.post("/api/v1/assets/upload-tickets", async ({ user, body }) => assetService.createUploadTicket(user.id, body));
-router.post("/api/mock-files/upload", async () => ({ uploaded: true }), { public: true });
+router.post("/api/mock-files/upload", async () => {
+  if (!appConfig.storage.mockEnabled) {
+    throw notFound("Mock 文件上传接口未启用");
+  }
+  return { uploaded: true };
+}, { public: true });
 router.post("/api/v1/assets", async ({ user, body }) => assetService.completeUpload(user.id, body));
 router.get("/api/v1/assets", async ({ user, url }) => page(assetService.listAssets(user.id, Object.fromEntries(url.searchParams)), url));
 router.get("/api/v1/assets/:assetId", async ({ user, params }) => assetService.getAsset(user.id, params.assetId));
@@ -98,7 +105,9 @@ router.delete("/api/v1/workflows/:workflowId", async ({ user, params }) => {
 });
 router.post("/api/v1/workflows/:workflowId/projects", async ({ user, params, body }) => workflowService.createProjectFromWorkflow(user.id, params.workflowId, body.title));
 
-router.get("/api/v1/plans", async () => ({ items: billingService.plans() }));
+router.get("/api/v1/plans", async () => ({ items: billingService.plans() }), { public: true });
+router.post("/api/v1/trial-applications/sms-codes", async ({ body }) => trialService.sendTrialSmsCode(body.phone), { public: true });
+router.post("/api/v1/trial-applications", async ({ body, req }) => trialService.createTrialApplication(body, req.headers["idempotency-key"]), { public: true });
 router.post("/api/v1/orders", async ({ user, body, req }) => billingService.createOrder(user.id, req.headers["idempotency-key"], body));
 router.get("/api/v1/orders", async ({ user, url }) => page(billingService.listOrders(user.id, url.searchParams.get("status")), url));
 router.get("/api/v1/orders/:orderNo", async ({ user, params }) => billingService.getOrder(user.id, params.orderNo));
@@ -107,7 +116,7 @@ router.post("/api/v1/orders/:orderNo/mock-paid", async ({ user, params }) => {
   billingService.completeLocalPayment(user.id, params.orderNo);
   return null;
 });
-router.post("/api/v1/payments/:payType/notify", async ({ params, body }) => billingService.notifyPayment(params.payType.toUpperCase(), body), { public: true, rawSuccess: true });
+router.post("/api/v1/payments/:payType/notify", async ({ params, body, req }) => billingService.notifyPayment(params.payType.toUpperCase(), body, req.headers), { public: true, rawSuccess: true });
 router.post("/api/v1/subscriptions/cancel-auto-renew", async ({ user }) => {
   billingService.cancelAutoRenew(user.id);
   return null;
@@ -145,7 +154,13 @@ export async function handleRequest(req, res) {
   }
   try {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    if (!isOperationalRoute(url.pathname)) {
+      await hydrateRuntimeStore();
+    }
     if (req.method === "GET" && url.pathname.startsWith("/api/mock-files/")) {
+      if (!appConfig.storage.mockEnabled) {
+        throw notFound("Mock 文件读取接口未启用");
+      }
       sendMockFile(res, trace, decodeURIComponent(url.pathname.slice("/api/mock-files/".length)));
       return;
     }
@@ -153,7 +168,7 @@ export async function handleRequest(req, res) {
     const token = bearerToken(req);
     let user = null;
     if (token) {
-      user = auth.resolveUser(token);
+      user = await auth.resolveUser(token);
     }
     if (!matched.options.public && !user) {
       throw unauthorized();
@@ -163,6 +178,9 @@ export async function handleRequest(req, res) {
     }
     const body = ["POST", "PUT", "PATCH"].includes(req.method) ? await readJson(req) : {};
     const result = await matched.handler({ req, url, params: matched.params, body, user, token });
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
+      await persistRuntimeStore();
+    }
     if (result?.__html) {
       res.statusCode = 200;
       res.setHeader("content-type", "text/html; charset=utf-8");
@@ -210,6 +228,10 @@ function html(value) {
 
 function noContent() {
   return { __noContent: true };
+}
+
+function isOperationalRoute(pathname) {
+  return pathname === "/api/health" || pathname === "/api/v3/api-docs" || pathname === "/api/doc.html";
 }
 
 function sendMockFile(res, trace, objectKey) {

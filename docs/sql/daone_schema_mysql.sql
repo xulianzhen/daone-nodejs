@@ -3,6 +3,13 @@
 -- 字符集：utf8mb4
 -- 本文件只创建表结构，不包含测试数据。
 
+CREATE TABLE IF NOT EXISTS daone_runtime_store (
+    store_key VARCHAR(64) NOT NULL,
+    store_value LONGTEXT NOT NULL,
+    updated_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (store_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS user_account (
     id BIGINT NOT NULL,
     phone VARCHAR(20) NULL,
